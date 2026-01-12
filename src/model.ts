@@ -1,50 +1,95 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
-import { execSync } from 'child_process';
+import * as https from 'https';
+import * as http from 'http';
+import { pipeline } from 'stream/promises';
+import * as tar from 'tar';
+import unbzip2 from 'unbzip2-stream';
 import { getModelsDir, getLocalModelsDir, loadConfig } from './config';
 import { SHERPA_MODELS } from './stt/providers/sherpa-onnx';
 import { KWS_MODEL } from './wake-word';
 
 /**
- * Check if required tools are installed
+ * Download a file from URL with progress indicator
  */
-function checkDependencies(): void {
-  const platform = os.platform();
-  const missing: string[] = [];
+async function downloadFile(url: string, destPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(destPath);
 
-  // Check curl
-  try {
-    execSync('which curl', { stdio: 'ignore' });
-  } catch {
-    missing.push('curl');
-  }
+    const request = (url.startsWith('https') ? https : http).get(url, (response) => {
+      // Handle redirects
+      if (response.statusCode === 301 || response.statusCode === 302) {
+        file.close();
+        fs.unlinkSync(destPath);
+        const redirectUrl = response.headers.location;
+        if (redirectUrl) {
+          downloadFile(redirectUrl, destPath).then(resolve).catch(reject);
+          return;
+        }
+        reject(new Error('Redirect without location header'));
+        return;
+      }
 
-  // Check tar
-  try {
-    execSync('which tar', { stdio: 'ignore' });
-  } catch {
-    missing.push('tar');
-  }
+      if (response.statusCode !== 200) {
+        file.close();
+        fs.unlinkSync(destPath);
+        reject(new Error(`HTTP ${response.statusCode}`));
+        return;
+      }
 
-  // Check bzip2 (needed for .tar.bz2)
-  try {
-    execSync('which bzip2', { stdio: 'ignore' });
-  } catch {
-    missing.push('bzip2');
-  }
+      const totalSize = parseInt(response.headers['content-length'] || '0', 10);
+      let downloadedSize = 0;
+      let lastPercent = 0;
 
-  if (missing.length > 0) {
-    console.error('\nMissing required tools:', missing.join(', '));
-    console.error('');
-    if (platform === 'linux') {
-      console.error('Install with: sudo apt install ' + missing.join(' '));
-    } else if (platform === 'darwin') {
-      console.error('Install with: brew install ' + missing.join(' '));
-    }
-    console.error('');
-    process.exit(1);
-  }
+      response.on('data', (chunk: Buffer) => {
+        downloadedSize += chunk.length;
+        if (totalSize > 0) {
+          const percent = Math.floor((downloadedSize / totalSize) * 100);
+          if (percent !== lastPercent && percent % 10 === 0) {
+            process.stdout.write(`\r  Progress: ${percent}%`);
+            lastPercent = percent;
+          }
+        }
+      });
+
+      response.pipe(file);
+
+      file.on('finish', () => {
+        file.close();
+        if (totalSize > 0) {
+          process.stdout.write('\r  Progress: 100%\n');
+        }
+        resolve();
+      });
+    });
+
+    request.on('error', (err) => {
+      file.close();
+      if (fs.existsSync(destPath)) {
+        fs.unlinkSync(destPath);
+      }
+      reject(err);
+    });
+
+    file.on('error', (err) => {
+      file.close();
+      if (fs.existsSync(destPath)) {
+        fs.unlinkSync(destPath);
+      }
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Extract a .tar.bz2 file using Node.js streams
+ */
+async function extractTarBz2(archivePath: string, destDir: string): Promise<void> {
+  const source = fs.createReadStream(archivePath);
+  const decompressor = unbzip2();
+  const extractor = tar.extract({ cwd: destDir });
+
+  await pipeline(source, decompressor, extractor);
 }
 
 /**
@@ -76,9 +121,6 @@ export function areAllModelsInstalled(): boolean {
  * Download all required models
  */
 export async function downloadAllModels(): Promise<void> {
-  // Check for required tools first
-  checkDependencies();
-
   const config = loadConfig();
   const modelsDir = getLocalModelsDir();
 
@@ -117,22 +159,26 @@ export async function downloadKwsModel(): Promise<void> {
 
   console.log(`Downloading ${KWS_MODEL.name} (${KWS_MODEL.size})...`);
 
-  const tarPath = path.join(modelsDir, 'kws-model.tar.bz2');
+  const archivePath = path.join(modelsDir, 'kws-model.tar.bz2');
 
   try {
-    // Download using curl
-    execSync(`curl -L --progress-bar -o "${tarPath}" "${KWS_MODEL.url}"`, { stdio: 'inherit' });
+    // Download using Node.js https
+    await downloadFile(KWS_MODEL.url, archivePath);
 
-    // Extract
+    // Extract using Node.js streams
     console.log('Extracting model...');
-    execSync(`tar -xjf "${tarPath}" -C "${modelsDir}"`, { stdio: 'pipe' });
+    await extractTarBz2(archivePath, modelsDir);
 
     // Clean up
-    fs.unlinkSync(tarPath);
+    fs.unlinkSync(archivePath);
 
     console.log('[OK] Keyword spotter model installed');
   } catch (error) {
     console.error('Failed to download KWS model:', error);
+    // Cleanup on error
+    if (fs.existsSync(archivePath)) {
+      fs.unlinkSync(archivePath);
+    }
     throw error;
   }
 }
@@ -164,18 +210,12 @@ export async function downloadSttModel(modelId: string): Promise<void> {
   const archivePath = path.join(modelsDir, `${modelId}.tar.bz2`);
 
   try {
-    // Download with curl
-    execSync(`curl -L --progress-bar -o "${archivePath}" "${modelInfo.url}"`, {
-      stdio: 'inherit',
-      cwd: modelsDir
-    });
+    // Download using Node.js https
+    await downloadFile(modelInfo.url, archivePath);
 
-    // Extract
+    // Extract using Node.js streams
     console.log('Extracting model files...');
-    execSync(`tar -xjf "${archivePath}"`, {
-      stdio: 'pipe',
-      cwd: modelsDir
-    });
+    await extractTarBz2(archivePath, modelsDir);
 
     // Cleanup archive
     fs.unlinkSync(archivePath);
@@ -183,6 +223,10 @@ export async function downloadSttModel(modelId: string): Promise<void> {
     console.log(`[OK] STT model (${modelId}) installed`);
   } catch (error) {
     console.error('Failed to download STT model:', error);
+    // Cleanup on error
+    if (fs.existsSync(archivePath)) {
+      fs.unlinkSync(archivePath);
+    }
     throw error;
   }
 }
