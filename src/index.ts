@@ -108,6 +108,6 @@ process.on('SIGTERM', () => {
 });
 
 // Export for CLI
-export { loadConfig, getConfigPath, getConfigValue, setConfigValue, resetConfig } from './config';
+export { loadConfig, getConfigPath, getConfigDir, getConfigValue, setConfigValue, resetConfig } from './config';
 export { checkModelsInstalled, downloadAllModels, getModelStatus } from './model';
 export { getPlatformSummary, getInstallInstructions } from './platform';

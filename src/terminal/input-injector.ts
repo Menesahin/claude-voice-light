@@ -4,19 +4,8 @@ import { promisify } from 'util';
 const execAsync = promisify(exec);
 
 export interface InputInjectorOptions {
-  /**
-   * Target terminal application
-   */
   terminal?: 'Terminal' | 'iTerm' | 'auto';
-
-  /**
-   * Whether to simulate pressing Enter after typing
-   */
   pressEnter?: boolean;
-
-  /**
-   * Delay between characters in milliseconds (for slow typing effect)
-   */
   typingDelay?: number;
 }
 
@@ -33,24 +22,26 @@ function hasCommand(cmd: string): boolean {
 }
 
 /**
- * Injects text into the terminal using AppleScript on macOS or clipboard+paste on Linux.
- * This allows voice-transcribed text to be sent to Claude Code.
+ * Check if running on Wayland
+ */
+function isWayland(): boolean {
+  return !!(process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland');
+}
+
+/**
+ * Injects text into the terminal
  */
 export class TerminalInputInjector {
   private terminal: 'Terminal' | 'iTerm';
 
   constructor(options: InputInjectorOptions = {}) {
     if (options.terminal === 'auto' || !options.terminal) {
-      // Auto-detect: prefer iTerm if running, otherwise Terminal
       this.terminal = 'Terminal';
     } else {
       this.terminal = options.terminal;
     }
   }
 
-  /**
-   * Types text into the active terminal window
-   */
   async type(text: string, pressEnter = true): Promise<void> {
     if (process.platform === 'linux') {
       return this.typeLinux(text, pressEnter);
@@ -60,15 +51,12 @@ export class TerminalInputInjector {
       throw new Error('Terminal input injection is only supported on macOS and Linux');
     }
 
-    // Escape special characters for AppleScript
     const escapedText = this.escapeForAppleScript(text);
-
     const script = this.generateAppleScript(escapedText, pressEnter);
 
     try {
       await this.runAppleScript(script);
     } catch (error) {
-      // Try the other terminal app
       const alternateTerminal = this.terminal === 'Terminal' ? 'iTerm' : 'Terminal';
       const alternateScript = this.generateAppleScript(escapedText, pressEnter, alternateTerminal);
 
@@ -80,41 +68,38 @@ export class TerminalInputInjector {
     }
   }
 
-  /**
-   * Runs an AppleScript, handling multi-line scripts properly
-   */
   private async runAppleScript(script: string): Promise<void> {
-    // Split script into lines and use multiple -e arguments
     const lines = script.split('\n').filter(line => line.trim());
     const args = lines.map(line => `-e '${line.replace(/'/g, "'\\''")}'`).join(' ');
     await execAsync(`osascript ${args}`);
   }
 
-  /**
-   * Types text character by character with a delay (for visual effect)
-   */
   async typeSlowly(text: string, delayMs = 50, pressEnter = true): Promise<void> {
     for (const char of text) {
       await this.type(char, false);
       await this.delay(delayMs);
     }
-
     if (pressEnter) {
       await this.pressKey('return');
     }
   }
 
-  /**
-   * Simulates pressing a key
-   */
   async pressKey(key: string): Promise<void> {
     if (process.platform === 'linux') {
-      const hasXdotool = hasCommand('xdotool');
-
-      if (hasXdotool) {
+      if (isWayland() && hasCommand('wtype')) {
+        const keyMap: Record<string, string> = {
+          return: 'Return',
+          enter: 'Return',
+          tab: 'Tab',
+          space: 'space',
+          escape: 'Escape',
+        };
+        const wtypeKey = keyMap[key.toLowerCase()] || key;
+        await execAsync(`wtype -k ${wtypeKey}`);
+      } else if (hasCommand('xdotool')) {
         await execAsync(`xdotool key ${key}`);
       } else {
-        throw new Error('xdotool not found. Install with: sudo apt install xdotool');
+        throw new Error('No input tool found. Install wtype (Wayland) or xdotool (X11).');
       }
       return;
     }
@@ -124,13 +109,8 @@ export class TerminalInputInjector {
     }
 
     const keyCode = this.getKeyCode(key);
-    const script = `
-      tell application "System Events"
-        key code ${keyCode}
-      end tell
-    `;
-
-    await execAsync(`osascript -e '${script.replace(/'/g, "'\\''")}'`);
+    const script = `tell application "System Events" to key code ${keyCode}`;
+    await execAsync(`osascript -e '${script}'`);
   }
 
   private generateAppleScript(text: string, pressEnter: boolean, terminal?: string): string {
@@ -146,10 +126,6 @@ export class TerminalInputInjector {
       `.replace(/\n/g, ' ');
     }
 
-    // Default: Terminal.app
-    // For Terminal, we use System Events to type
-    // Note: keystroke and key code must be separate statements
-    // Added delay before Enter to prevent race condition
     if (pressEnter) {
       return `tell application "Terminal" to activate
 delay 0.1
@@ -171,7 +147,20 @@ end tell`;
    * Copy text to clipboard on Linux
    */
   private async copyToClipboard(text: string): Promise<boolean> {
-    // Try xclip first (most common)
+    // Wayland: use wl-copy
+    if (isWayland() && hasCommand('wl-copy')) {
+      return new Promise((resolve) => {
+        const proc = spawn('wl-copy', [], {
+          stdio: ['pipe', 'ignore', 'ignore']
+        });
+        proc.stdin.write(text);
+        proc.stdin.end();
+        proc.on('close', (code) => resolve(code === 0));
+        proc.on('error', () => resolve(false));
+      });
+    }
+
+    // X11: try xclip
     if (hasCommand('xclip')) {
       return new Promise((resolve) => {
         const proc = spawn('xclip', ['-selection', 'clipboard'], {
@@ -184,23 +173,10 @@ end tell`;
       });
     }
 
-    // Try xsel
+    // X11: try xsel
     if (hasCommand('xsel')) {
       return new Promise((resolve) => {
         const proc = spawn('xsel', ['--clipboard', '--input'], {
-          stdio: ['pipe', 'ignore', 'ignore']
-        });
-        proc.stdin.write(text);
-        proc.stdin.end();
-        proc.on('close', (code) => resolve(code === 0));
-        proc.on('error', () => resolve(false));
-      });
-    }
-
-    // Try wl-copy for Wayland
-    if (hasCommand('wl-copy')) {
-      return new Promise((resolve) => {
-        const proc = spawn('wl-copy', [], {
           stdio: ['pipe', 'ignore', 'ignore']
         });
         proc.stdin.write(text);
@@ -214,32 +190,58 @@ end tell`;
   }
 
   /**
-   * Types text into the active terminal on Linux using clipboard method
+   * Types text into the active terminal on Linux
    */
   private async typeLinux(text: string, pressEnter: boolean): Promise<void> {
-    // Method 1: Clipboard + Paste (most reliable)
-    const copied = await this.copyToClipboard(text);
+    const wayland = isWayland();
 
-    if (copied && hasCommand('xdotool')) {
+    // Method 1: Direct typing with wtype (Wayland) - BEST for Wayland
+    if (wayland && hasCommand('wtype')) {
       try {
-        // Small delay to ensure clipboard is ready
-        await this.delay(50);
-
-        // Paste using Ctrl+Shift+V (standard terminal paste)
-        await execAsync('xdotool key --clearmodifiers ctrl+shift+v');
-
-        if (pressEnter) {
-          await this.delay(100);
-          await execAsync('xdotool key Return');
-        }
+        // wtype types text directly, very reliable on Wayland
+        const fullText = pressEnter ? text + '\n' : text;
+        await execAsync(`wtype "${fullText.replace(/"/g, '\\"')}"`);
         return;
       } catch (error) {
-        console.error('Clipboard paste failed, trying direct type...', error);
+        console.error('wtype failed:', error);
       }
     }
 
-    // Method 2: Direct typing with xdotool (fallback)
-    if (hasCommand('xdotool')) {
+    // Method 2: Clipboard + paste shortcut
+    const copied = await this.copyToClipboard(text);
+
+    if (copied) {
+      await this.delay(50);
+
+      if (wayland && hasCommand('wtype')) {
+        // Wayland: Ctrl+Shift+V with wtype
+        try {
+          await execAsync('wtype -M ctrl -M shift -k v -m shift -m ctrl');
+          if (pressEnter) {
+            await this.delay(100);
+            await execAsync('wtype -k Return');
+          }
+          return;
+        } catch (error) {
+          console.error('wtype paste failed:', error);
+        }
+      } else if (hasCommand('xdotool')) {
+        // X11: Ctrl+Shift+V with xdotool
+        try {
+          await execAsync('xdotool key --clearmodifiers ctrl+shift+v');
+          if (pressEnter) {
+            await this.delay(100);
+            await execAsync('xdotool key Return');
+          }
+          return;
+        } catch (error) {
+          console.error('xdotool paste failed:', error);
+        }
+      }
+    }
+
+    // Method 3: Direct typing with xdotool (X11 fallback)
+    if (!wayland && hasCommand('xdotool')) {
       const escapedText = text
         .replace(/\\/g, '\\\\')
         .replace(/"/g, '\\"')
@@ -254,62 +256,36 @@ end tell`;
         }
         return;
       } catch (error) {
-        throw new Error(`Failed to inject text via xdotool: ${error}`);
+        throw new Error(`xdotool failed: ${error}`);
       }
     }
 
+    // No tool available
+    const toolSuggestion = wayland
+      ? 'sudo apt install wtype wl-clipboard'
+      : 'sudo apt install xdotool xclip';
+
     throw new Error(
-      'No clipboard or input tool found. Install:\n' +
-      '  sudo apt install xdotool xclip'
+      `No input tool found for ${wayland ? 'Wayland' : 'X11'}.\n` +
+      `Install with: ${toolSuggestion}`
     );
   }
 
   private escapeForAppleScript(text: string): string {
     return text
-      .replace(/\\/g, '\\\\') // Escape backslashes first
-      .replace(/"/g, '\\"') // Escape double quotes
-      .replace(/\n/g, '\\n') // Escape newlines
-      .replace(/\r/g, '\\r') // Escape carriage returns
-      .replace(/\t/g, '\\t'); // Escape tabs
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, '\\n')
+      .replace(/\r/g, '\\r')
+      .replace(/\t/g, '\\t');
   }
 
   private getKeyCode(key: string): number {
     const keyCodes: Record<string, number> = {
-      return: 36,
-      enter: 36,
-      tab: 48,
-      space: 49,
-      delete: 51,
-      escape: 53,
-      command: 55,
-      shift: 56,
-      capslock: 57,
-      option: 58,
-      control: 59,
-      fn: 63,
-      f1: 122,
-      f2: 120,
-      f3: 99,
-      f4: 118,
-      f5: 96,
-      f6: 97,
-      f7: 98,
-      f8: 100,
-      f9: 101,
-      f10: 109,
-      f11: 103,
-      f12: 111,
-      home: 115,
-      pageup: 116,
-      forwarddelete: 117,
-      end: 119,
-      pagedown: 121,
-      left: 123,
-      right: 124,
-      down: 125,
-      up: 126,
+      return: 36, enter: 36, tab: 48, space: 49, delete: 51,
+      escape: 53, command: 55, shift: 56, capslock: 57,
+      option: 58, control: 59, fn: 63,
     };
-
     return keyCodes[key.toLowerCase()] || 0;
   }
 
@@ -317,27 +293,14 @@ end tell`;
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  /**
-   * Check if we're running inside a terminal
-   */
   static isInTerminal(): boolean {
     return !!(process.stdout.isTTY && (process.env.TERM || process.env.TERM_PROGRAM));
   }
 
-  /**
-   * Detect the current terminal application
-   */
   static detectTerminal(): 'Terminal' | 'iTerm' | 'unknown' {
     const termProgram = process.env.TERM_PROGRAM;
-
-    if (termProgram === 'Apple_Terminal') {
-      return 'Terminal';
-    }
-
-    if (termProgram === 'iTerm.app') {
-      return 'iTerm';
-    }
-
+    if (termProgram === 'Apple_Terminal') return 'Terminal';
+    if (termProgram === 'iTerm.app') return 'iTerm';
     return 'unknown';
   }
 }
