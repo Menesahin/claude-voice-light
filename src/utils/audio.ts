@@ -5,7 +5,22 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as path from 'path';
 import { getPlatformCapabilities } from '../platform';
+
+/**
+ * Get the bundled sounds directory
+ */
+function getBundledSoundsDir(): string {
+  // When running from dist/, sounds is at ../sounds
+  // When running from src/, sounds is at ../sounds
+  const distDir = path.join(__dirname, '..', '..', 'sounds');
+  if (fs.existsSync(distDir)) {
+    return distDir;
+  }
+  // Fallback for development
+  return path.join(__dirname, '..', '..', '..', 'sounds');
+}
 
 /**
  * Play a system sound (cross-platform)
@@ -13,18 +28,33 @@ import { getPlatformCapabilities } from '../platform';
  */
 export function playSound(soundName: string): void {
   const caps = getPlatformCapabilities();
+  const bundledDir = getBundledSoundsDir();
 
   if (caps.platform === 'darwin') {
-    const soundPath = `/System/Library/Sounds/${soundName}.aiff`;
-    spawn('afplay', [soundPath], { stdio: 'ignore' });
-  } else if (caps.platform === 'linux' && caps.audioPlayer) {
-    const linuxSounds: Record<string, string> = {
-      Ping: '/usr/share/sounds/freedesktop/stereo/message.oga',
-      Pop: '/usr/share/sounds/freedesktop/stereo/complete.oga',
-    };
-    const soundPath = linuxSounds[soundName];
-    if (soundPath && fs.existsSync(soundPath)) {
-      spawn(caps.audioPlayer, [soundPath], { stdio: 'ignore' });
+    // Try macOS system sounds first
+    const systemPath = `/System/Library/Sounds/${soundName}.aiff`;
+    if (fs.existsSync(systemPath)) {
+      spawn('afplay', [systemPath], { stdio: 'ignore' });
+      return;
+    }
+    // Fallback to bundled sounds
+    const bundledPath = path.join(bundledDir, `${soundName.toLowerCase()}.wav`);
+    if (fs.existsSync(bundledPath)) {
+      spawn('afplay', [bundledPath], { stdio: 'ignore' });
+    }
+  } else if (caps.platform === 'linux') {
+    // Always use bundled sounds on Linux for consistency
+    const bundledPath = path.join(bundledDir, `${soundName.toLowerCase()}.wav`);
+
+    if (fs.existsSync(bundledPath)) {
+      // Try different audio players
+      if (caps.audioPlayer === 'ffplay') {
+        spawn('ffplay', ['-nodisp', '-autoexit', '-loglevel', 'quiet', bundledPath], { stdio: 'ignore' });
+      } else if (caps.audioPlayer === 'paplay') {
+        spawn('paplay', [bundledPath], { stdio: 'ignore' });
+      } else if (caps.audioPlayer === 'aplay') {
+        spawn('aplay', ['-q', bundledPath], { stdio: 'ignore' });
+      }
     }
   }
 }

@@ -109,11 +109,25 @@ export class TerminalInputInjector {
    */
   async pressKey(key: string): Promise<void> {
     if (process.platform === 'linux') {
-      // Use xdotool for Linux
-      if (!hasCommand('xdotool')) {
-        throw new Error('xdotool not found. Install with: sudo apt install xdotool');
+      const hasYdotool = hasCommand('ydotool');
+      const hasXdotool = hasCommand('xdotool');
+
+      if (hasYdotool) {
+        // Map key names to ydotool key codes
+        const keyMap: Record<string, string> = {
+          return: '28:1 28:0',
+          enter: '28:1 28:0',
+          tab: '15:1 15:0',
+          space: '57:1 57:0',
+          escape: '1:1 1:0',
+        };
+        const keyCode = keyMap[key.toLowerCase()] || key;
+        await execAsync(`ydotool key ${keyCode}`);
+      } else if (hasXdotool) {
+        await execAsync(`xdotool key ${key}`);
+      } else {
+        throw new Error('No input tool found. Install ydotool or xdotool.');
       }
-      await execAsync(`xdotool key ${key}`);
       return;
     }
 
@@ -166,14 +180,18 @@ end tell`;
   }
 
   /**
-   * Types text into the active terminal using xdotool on Linux
+   * Types text into the active terminal using xdotool or ydotool on Linux
    */
   private async typeLinux(text: string, pressEnter: boolean): Promise<void> {
-    // Check for xdotool
-    if (!hasCommand('xdotool')) {
+    // Check for available tools - prefer ydotool (works on Wayland), fallback to xdotool (X11 only)
+    const hasYdotool = hasCommand('ydotool');
+    const hasXdotool = hasCommand('xdotool');
+
+    if (!hasYdotool && !hasXdotool) {
       throw new Error(
-        'xdotool not found. Install it with: sudo apt install xdotool\n' +
-        'Note: xdotool works with X11. For Wayland, use ydotool.'
+        'No input tool found. Install one of:\n' +
+        '  - ydotool (recommended, works on Wayland): sudo apt install ydotool\n' +
+        '  - xdotool (X11 only): sudo apt install xdotool'
       );
     }
 
@@ -185,15 +203,24 @@ end tell`;
       .replace(/\$/g, '\\$');
 
     try {
-      // Type the text using xdotool
-      await execAsync(`xdotool type --clearmodifiers "${escapedText}"`);
-
-      // Press Enter if requested
-      if (pressEnter) {
-        await execAsync('xdotool key Return');
+      if (hasYdotool) {
+        // Use ydotool (Wayland compatible)
+        // Small delay to ensure terminal has focus
+        await this.delay(50);
+        await execAsync(`ydotool type "${escapedText}"`);
+        if (pressEnter) {
+          await execAsync('ydotool key 28:1 28:0'); // Enter key
+        }
+      } else {
+        // Use xdotool (X11 only)
+        await execAsync(`xdotool type --clearmodifiers "${escapedText}"`);
+        if (pressEnter) {
+          await execAsync('xdotool key Return');
+        }
       }
     } catch (error) {
-      throw new Error(`Failed to inject text via xdotool: ${error}`);
+      const tool = hasYdotool ? 'ydotool' : 'xdotool';
+      throw new Error(`Failed to inject text via ${tool}: ${error}`);
     }
   }
 
