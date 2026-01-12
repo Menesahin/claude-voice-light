@@ -1,4 +1,4 @@
-import { exec, execSync } from 'child_process';
+import { exec, execSync, spawn } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
@@ -33,7 +33,7 @@ function hasCommand(cmd: string): boolean {
 }
 
 /**
- * Injects text into the terminal using AppleScript on macOS or xdotool on Linux.
+ * Injects text into the terminal using AppleScript on macOS or clipboard+paste on Linux.
  * This allows voice-transcribed text to be sent to Claude Code.
  */
 export class TerminalInputInjector {
@@ -109,24 +109,12 @@ export class TerminalInputInjector {
    */
   async pressKey(key: string): Promise<void> {
     if (process.platform === 'linux') {
-      const hasYdotool = hasCommand('ydotool');
       const hasXdotool = hasCommand('xdotool');
 
-      if (hasYdotool) {
-        // Map key names to ydotool key codes
-        const keyMap: Record<string, string> = {
-          return: '28:1 28:0',
-          enter: '28:1 28:0',
-          tab: '15:1 15:0',
-          space: '57:1 57:0',
-          escape: '1:1 1:0',
-        };
-        const keyCode = keyMap[key.toLowerCase()] || key;
-        await execAsync(`ydotool key ${keyCode}`);
-      } else if (hasXdotool) {
+      if (hasXdotool) {
         await execAsync(`xdotool key ${key}`);
       } else {
-        throw new Error('No input tool found. Install ydotool or xdotool.');
+        throw new Error('xdotool not found. Install with: sudo apt install xdotool');
       }
       return;
     }
@@ -180,48 +168,100 @@ end tell`;
   }
 
   /**
-   * Types text into the active terminal using xdotool or ydotool on Linux
+   * Copy text to clipboard on Linux
+   */
+  private async copyToClipboard(text: string): Promise<boolean> {
+    // Try xclip first (most common)
+    if (hasCommand('xclip')) {
+      return new Promise((resolve) => {
+        const proc = spawn('xclip', ['-selection', 'clipboard'], {
+          stdio: ['pipe', 'ignore', 'ignore']
+        });
+        proc.stdin.write(text);
+        proc.stdin.end();
+        proc.on('close', (code) => resolve(code === 0));
+        proc.on('error', () => resolve(false));
+      });
+    }
+
+    // Try xsel
+    if (hasCommand('xsel')) {
+      return new Promise((resolve) => {
+        const proc = spawn('xsel', ['--clipboard', '--input'], {
+          stdio: ['pipe', 'ignore', 'ignore']
+        });
+        proc.stdin.write(text);
+        proc.stdin.end();
+        proc.on('close', (code) => resolve(code === 0));
+        proc.on('error', () => resolve(false));
+      });
+    }
+
+    // Try wl-copy for Wayland
+    if (hasCommand('wl-copy')) {
+      return new Promise((resolve) => {
+        const proc = spawn('wl-copy', [], {
+          stdio: ['pipe', 'ignore', 'ignore']
+        });
+        proc.stdin.write(text);
+        proc.stdin.end();
+        proc.on('close', (code) => resolve(code === 0));
+        proc.on('error', () => resolve(false));
+      });
+    }
+
+    return false;
+  }
+
+  /**
+   * Types text into the active terminal on Linux using clipboard method
    */
   private async typeLinux(text: string, pressEnter: boolean): Promise<void> {
-    // Check for available tools - prefer ydotool (works on Wayland), fallback to xdotool (X11 only)
-    const hasYdotool = hasCommand('ydotool');
-    const hasXdotool = hasCommand('xdotool');
+    // Method 1: Clipboard + Paste (most reliable)
+    const copied = await this.copyToClipboard(text);
 
-    if (!hasYdotool && !hasXdotool) {
-      throw new Error(
-        'No input tool found. Install one of:\n' +
-        '  - ydotool (recommended, works on Wayland): sudo apt install ydotool\n' +
-        '  - xdotool (X11 only): sudo apt install xdotool'
-      );
-    }
-
-    // Escape special characters for shell
-    const escapedText = text
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
-      .replace(/`/g, '\\`')
-      .replace(/\$/g, '\\$');
-
-    try {
-      if (hasYdotool) {
-        // Use ydotool (Wayland compatible)
-        // Small delay to ensure terminal has focus
+    if (copied && hasCommand('xdotool')) {
+      try {
+        // Small delay to ensure clipboard is ready
         await this.delay(50);
-        await execAsync(`ydotool type "${escapedText}"`);
+
+        // Paste using Ctrl+Shift+V (standard terminal paste)
+        await execAsync('xdotool key --clearmodifiers ctrl+shift+v');
+
         if (pressEnter) {
-          await execAsync('ydotool key 28:1 28:0'); // Enter key
-        }
-      } else {
-        // Use xdotool (X11 only)
-        await execAsync(`xdotool type --clearmodifiers "${escapedText}"`);
-        if (pressEnter) {
+          await this.delay(100);
           await execAsync('xdotool key Return');
         }
+        return;
+      } catch (error) {
+        console.error('Clipboard paste failed, trying direct type...', error);
       }
-    } catch (error) {
-      const tool = hasYdotool ? 'ydotool' : 'xdotool';
-      throw new Error(`Failed to inject text via ${tool}: ${error}`);
     }
+
+    // Method 2: Direct typing with xdotool (fallback)
+    if (hasCommand('xdotool')) {
+      const escapedText = text
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/`/g, '\\`')
+        .replace(/\$/g, '\\$');
+
+      try {
+        await execAsync(`xdotool type --clearmodifiers -- "${escapedText}"`);
+        if (pressEnter) {
+          await this.delay(50);
+          await execAsync('xdotool key Return');
+        }
+        return;
+      } catch (error) {
+        throw new Error(`Failed to inject text via xdotool: ${error}`);
+      }
+    }
+
+    throw new Error(
+      'No clipboard or input tool found. Install:\n' +
+      '  sudo apt install xdotool xclip'
+    );
   }
 
   private escapeForAppleScript(text: string): string {
