@@ -1,9 +1,51 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { execSync } from 'child_process';
 import { getModelsDir, getLocalModelsDir, loadConfig } from './config';
 import { SHERPA_MODELS } from './stt/providers/sherpa-onnx';
 import { KWS_MODEL } from './wake-word';
+
+/**
+ * Check if required tools are installed
+ */
+function checkDependencies(): void {
+  const platform = os.platform();
+  const missing: string[] = [];
+
+  // Check curl
+  try {
+    execSync('which curl', { stdio: 'ignore' });
+  } catch {
+    missing.push('curl');
+  }
+
+  // Check tar
+  try {
+    execSync('which tar', { stdio: 'ignore' });
+  } catch {
+    missing.push('tar');
+  }
+
+  // Check bzip2 (needed for .tar.bz2)
+  try {
+    execSync('which bzip2', { stdio: 'ignore' });
+  } catch {
+    missing.push('bzip2');
+  }
+
+  if (missing.length > 0) {
+    console.error('\nMissing required tools:', missing.join(', '));
+    console.error('');
+    if (platform === 'linux') {
+      console.error('Install with: sudo apt install ' + missing.join(' '));
+    } else if (platform === 'darwin') {
+      console.error('Install with: brew install ' + missing.join(' '));
+    }
+    console.error('');
+    process.exit(1);
+  }
+}
 
 /**
  * Check if required models are installed
@@ -34,6 +76,9 @@ export function areAllModelsInstalled(): boolean {
  * Download all required models
  */
 export async function downloadAllModels(): Promise<void> {
+  // Check for required tools first
+  checkDependencies();
+
   const config = loadConfig();
   const modelsDir = getLocalModelsDir();
 
