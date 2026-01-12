@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as readline from 'readline';
 import {
   startListener,
   loadConfig,
@@ -21,7 +22,42 @@ import {
 
 const program = new Command();
 
-// PID file for daemon management
+// Utility functions
+function hasCommand(cmd: string): boolean {
+  try {
+    execSync(`which ${cmd}`, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isWayland(): boolean {
+  return !!(process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland');
+}
+
+function getPackageManager(): 'apt' | 'dnf' | 'pacman' | 'brew' | null {
+  if (hasCommand('apt')) return 'apt';
+  if (hasCommand('dnf')) return 'dnf';
+  if (hasCommand('pacman')) return 'pacman';
+  if (hasCommand('brew')) return 'brew';
+  return null;
+}
+
+async function askQuestion(question: string): Promise<boolean> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.toLowerCase() !== 'n');
+    });
+  });
+}
+
 function getPidFile(): string {
   return path.join(getConfigDir(), 'daemon.pid');
 }
@@ -32,9 +68,7 @@ function getLogFile(): string {
 
 function isRunning(): boolean {
   const pidFile = getPidFile();
-  if (!fs.existsSync(pidFile)) {
-    return false;
-  }
+  if (!fs.existsSync(pidFile)) return false;
 
   try {
     const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
@@ -48,9 +82,7 @@ function isRunning(): boolean {
 
 function getDaemonPid(): number | null {
   const pidFile = getPidFile();
-  if (!fs.existsSync(pidFile)) {
-    return null;
-  }
+  if (!fs.existsSync(pidFile)) return null;
   try {
     return parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
   } catch {
@@ -61,7 +93,210 @@ function getDaemonPid(): number | null {
 program
   .name('claude-voice-light')
   .description('Lightweight voice input for Claude Code')
-  .version('1.2.0');
+  .version('1.3.0');
+
+// Setup command
+program
+  .command('setup')
+  .description('Interactive setup - install dependencies and download models')
+  .option('-y, --yes', 'Auto-confirm all prompts')
+  .action(async (options) => {
+    console.log('');
+    console.log('Claude Voice Light - Setup');
+    console.log('==========================');
+    console.log('');
+
+    const platform = process.platform;
+    const wayland = isWayland();
+    const pkgManager = getPackageManager();
+
+    // Platform info
+    console.log(`Platform: ${platform}`);
+    if (platform === 'linux') {
+      console.log(`Display: ${wayland ? 'Wayland' : 'X11'}`);
+    }
+    console.log(`Package manager: ${pkgManager || 'not detected'}`);
+    console.log('');
+
+    // Check dependencies
+    console.log('Checking dependencies...');
+    console.log('');
+
+    interface Dep {
+      name: string;
+      command: string;
+      packages: { apt?: string; dnf?: string; pacman?: string; brew?: string };
+      required: boolean;
+      description: string;
+    }
+
+    const deps: Dep[] = [];
+
+    if (platform === 'darwin') {
+      deps.push({
+        name: 'sox',
+        command: 'rec',
+        packages: { brew: 'sox' },
+        required: true,
+        description: 'Audio capture'
+      });
+    }
+
+    if (platform === 'linux') {
+      // Audio capture
+      deps.push({
+        name: 'alsa-utils',
+        command: 'arecord',
+        packages: { apt: 'alsa-utils', dnf: 'alsa-utils', pacman: 'alsa-utils' },
+        required: true,
+        description: 'Audio capture (microphone)'
+      });
+
+      // Audio playback
+      deps.push({
+        name: 'pulseaudio-utils',
+        command: 'paplay',
+        packages: { apt: 'pulseaudio-utils', dnf: 'pulseaudio-utils', pacman: 'pulseaudio' },
+        required: false,
+        description: 'Audio playback (sounds)'
+      });
+
+      if (wayland) {
+        // Wayland tools
+        deps.push({
+          name: 'wtype',
+          command: 'wtype',
+          packages: { apt: 'wtype', dnf: 'wtype', pacman: 'wtype' },
+          required: true,
+          description: 'Keyboard simulation (Wayland)'
+        });
+        deps.push({
+          name: 'wl-clipboard',
+          command: 'wl-copy',
+          packages: { apt: 'wl-clipboard', dnf: 'wl-clipboard', pacman: 'wl-clipboard' },
+          required: true,
+          description: 'Clipboard (Wayland)'
+        });
+      } else {
+        // X11 tools
+        deps.push({
+          name: 'xdotool',
+          command: 'xdotool',
+          packages: { apt: 'xdotool', dnf: 'xdotool', pacman: 'xdotool' },
+          required: true,
+          description: 'Keyboard simulation (X11)'
+        });
+        deps.push({
+          name: 'xclip',
+          command: 'xclip',
+          packages: { apt: 'xclip', dnf: 'xclip', pacman: 'xclip' },
+          required: true,
+          description: 'Clipboard (X11)'
+        });
+      }
+    }
+
+    // Check each dependency
+    const missing: Dep[] = [];
+    const installed: Dep[] = [];
+
+    for (const dep of deps) {
+      const has = hasCommand(dep.command);
+      if (has) {
+        console.log(`  [OK] ${dep.name} - ${dep.description}`);
+        installed.push(dep);
+      } else {
+        console.log(`  [X]  ${dep.name} - ${dep.description}`);
+        missing.push(dep);
+      }
+    }
+    console.log('');
+
+    // Install missing dependencies
+    if (missing.length > 0 && pkgManager) {
+      const packages = missing
+        .map(d => d.packages[pkgManager as keyof typeof d.packages])
+        .filter(Boolean)
+        .join(' ');
+
+      if (packages) {
+        console.log(`Missing packages: ${packages}`);
+        console.log('');
+
+        const shouldInstall = options.yes || await askQuestion('Install missing packages? [Y/n] ');
+
+        if (shouldInstall) {
+          console.log('');
+          console.log('Installing...');
+
+          let cmd = '';
+          switch (pkgManager) {
+            case 'apt':
+              cmd = `sudo apt install -y ${packages}`;
+              break;
+            case 'dnf':
+              cmd = `sudo dnf install -y ${packages}`;
+              break;
+            case 'pacman':
+              cmd = `sudo pacman -S --noconfirm ${packages}`;
+              break;
+            case 'brew':
+              cmd = `brew install ${packages}`;
+              break;
+          }
+
+          try {
+            execSync(cmd, { stdio: 'inherit' });
+            console.log('');
+            console.log('Packages installed successfully.');
+          } catch (error) {
+            console.error('');
+            console.error('Failed to install packages. Try manually:');
+            console.error(`  ${cmd}`);
+          }
+        }
+      }
+    } else if (missing.length > 0) {
+      console.log('Could not detect package manager.');
+      console.log('Please install manually:');
+      missing.forEach(d => console.log(`  - ${d.name}: ${d.description}`));
+    } else {
+      console.log('All dependencies installed!');
+    }
+    console.log('');
+
+    // Check models
+    console.log('Checking models...');
+    const modelStatus = checkModelsInstalled();
+
+    console.log(`  Keyword spotter: ${modelStatus.kws ? '[OK]' : '[X] not installed'}`);
+    console.log(`  STT model: ${modelStatus.stt ? '[OK]' : '[X] not installed'}`);
+    console.log('');
+
+    if (!modelStatus.kws || !modelStatus.stt) {
+      const shouldDownload = options.yes || await askQuestion('Download missing models? [Y/n] ');
+
+      if (shouldDownload) {
+        console.log('');
+        try {
+          await downloadAllModels();
+        } catch (error) {
+          console.error('Failed to download models:', error);
+        }
+      }
+    } else {
+      console.log('All models installed!');
+    }
+
+    console.log('');
+    console.log('Setup complete!');
+    console.log('');
+    console.log('Usage:');
+    console.log('  claude-voice-light start    # Start in background');
+    console.log('  claude-voice-light stop     # Stop');
+    console.log('  claude-voice-light status   # Check status');
+    console.log('');
+  });
 
 // Start command
 program
@@ -70,7 +305,6 @@ program
   .option('-f, --foreground', 'Run in foreground')
   .action(async (options) => {
     if (options.foreground) {
-      // Foreground mode - write PID if running as daemon child
       if (process.env.CVL_DAEMON === '1') {
         const configDir = getConfigDir();
         if (!fs.existsSync(configDir)) {
@@ -86,7 +320,6 @@ program
         process.exit(1);
       }
     } else {
-      // Background daemon mode
       if (isRunning()) {
         console.log('Already running. Use "claude-voice-light stop" first.');
         return;
@@ -110,15 +343,12 @@ program
       });
 
       child.unref();
-
-      // Wait a bit for the child to write its PID
       await new Promise(r => setTimeout(r, 500));
 
       console.log('Claude Voice Light started in background.');
       console.log(`Log: ${logFile}`);
       console.log('');
       console.log('Use "claude-voice-light stop" to stop.');
-      console.log('Use "claude-voice-light logs -f" to follow logs.');
     }
   });
 
@@ -138,7 +368,7 @@ program
       process.kill(pid, 'SIGTERM');
       try { fs.unlinkSync(getPidFile()); } catch {}
       console.log('Stopped.');
-    } catch (error) {
+    } catch {
       try { fs.unlinkSync(getPidFile()); } catch {}
       console.log('Stopped (was not running).');
     }
@@ -158,7 +388,6 @@ program
       await new Promise(r => setTimeout(r, 500));
     }
 
-    // Start in background
     const configDir = getConfigDir();
     if (!fs.existsSync(configDir)) {
       fs.mkdirSync(configDir, { recursive: true });
@@ -219,7 +448,7 @@ program
     }
 
     if (!modelStatus.kws || !modelStatus.stt) {
-      console.log('Run: claude-voice-light model download');
+      console.log('Run: claude-voice-light setup');
     }
   });
 
