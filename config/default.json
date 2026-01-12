@@ -1,0 +1,41 @@
+{
+  "wakeWord": {
+    "keyword": "jarvis",
+    "sensitivity": 0.5,
+    "playSound": true,
+    "keywords": {
+      "jarvis": [
+        "▁JA R VI S",
+        "▁JA R V I S",
+        "J AR VI S",
+        "J A R VI S",
+        "J A R V I S",
+        "▁JA R V IS"
+      ],
+      "claude": [
+        "▁C L A U DE",
+        "▁C L A U D E",
+        "C L A U DE",
+        "C L A U D E",
+        "▁C LA U DE",
+        "C LA U D E"
+      ],
+      "hey computer": [
+        "▁HE Y ▁COMPU T ER",
+        "HE Y ▁COMPU T ER",
+        "▁HE Y ▁COM PU T ER"
+      ]
+    }
+  },
+  "stt": {
+    "language": "en",
+    "model": "whisper-tiny"
+  },
+  "recording": {
+    "sampleRate": 16000,
+    "silenceThreshold": 2500,
+    "silenceAmplitude": 500,
+    "maxDuration": 30000
+  },
+  "debug": false
+}

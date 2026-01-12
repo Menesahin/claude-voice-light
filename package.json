@@ -1,0 +1,60 @@
+{
+  "name": "claude-voice-light",
+  "version": "1.0.0",
+  "description": "Lightweight voice input for Claude Code - wake word detection and speech-to-text",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "claude-voice-light": "./bin/claude-voice-light"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/cli.ts"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "voice",
+    "stt",
+    "speech",
+    "wake-word",
+    "jarvis",
+    "voice-input"
+  ],
+  "author": "Enes Sahin <menesahin99@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Menesahin/claude-voice-light.git"
+  },
+  "homepage": "https://github.com/Menesahin/claude-voice-light#readme",
+  "dependencies": {
+    "commander": "^12.0.0",
+    "sherpa-onnx-node": "^1.12.20"
+  },
+  "optionalDependencies": {
+    "sherpa-onnx-darwin-arm64": "^1.12.20",
+    "sherpa-onnx-darwin-x64": "^1.12.20",
+    "sherpa-onnx-linux-arm64": "^1.12.20",
+    "sherpa-onnx-linux-x64": "^1.12.20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "files": [
+    "bin/**/*",
+    "dist/**/*",
+    "config/**/*"
+  ]
+}

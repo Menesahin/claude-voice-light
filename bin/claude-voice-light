@@ -1,0 +1,23 @@
+#!/bin/bash
+
+# Resolve symlinks to get the real script location
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Set library path for sherpa-onnx native modules
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS
+    export DYLD_LIBRARY_PATH="$PACKAGE_DIR/node_modules/sherpa-onnx-darwin-arm64:$PACKAGE_DIR/node_modules/sherpa-onnx-darwin-x64:$DYLD_LIBRARY_PATH"
+elif [[ "$OSTYPE" == "linux"* ]]; then
+    # Linux
+    export LD_LIBRARY_PATH="$PACKAGE_DIR/node_modules/sherpa-onnx-linux-x64:$PACKAGE_DIR/node_modules/sherpa-onnx-linux-arm64:$LD_LIBRARY_PATH"
+fi
+
+# Run the CLI
+exec node "$PACKAGE_DIR/dist/cli.js" "$@"
